@@ -1,12 +1,22 @@
 import os
+#os.environ['USE_PATH_FOR_GDAL_PYTHON']='YES'
 os.environ['PROJ_LIB'] = 'C:\\Users\\Mariano\\anaconda3\\envs\\geoconda\\Library\\share\\proj'
 os.environ['GDAL_DATA'] = 'C:\\Users\\Mariano\\anaconda3\\envs\\geoconda\\Library\\share\\gdal'
 
 from osgeo import ogr
+#import geojson
 
-# cargo el shapefile
-shapefiles_path = 'resources/Gral_Lopez.shp'
+
+# Cargo el shapefile. Un shapefile es el formato de almacenamiento
+# desarrollado por ESRI para vector data. Es en realidad una coleccion
+# de archivos
+
+shapefiles_path = 'shapefile'
 shapefile = ogr.Open(shapefiles_path)
+
+# OGR model se compone de Data Sources, Layers y Features. 
+# Features tiene attributes y Geometry
+# Vector data model https://gdal.org/user/vector_data_model.html
 
 # miro layers
 numLayers = shapefile.GetLayerCount()
@@ -38,65 +48,80 @@ def analyzeGeometry(geometry, indent=0):
     for i in range(geometry.GetGeometryCount()):
         analyzeGeometry(geometry.GetGeometryRef(i), indent+1)
 
-analyzeGeometry(feature.GetGeometryRef(), 3)
+geom = feature.GetGeometryRef()
+analyzeGeometry(geom, 3)
+
+#-----descarga de imagines con google earth engine------#
+
+import ee
+import time
+import json
+from ee import geometry
+
+# conda install -c conda-forge fiona
+# https://fiona.readthedocs.io/en/latest/manual.html
+# import fiona
 
 
-import math
+ee.Authenticate()
+ee.Initialize()
 
+gj = feature.GetGeometryRef().ExportToJson()
+gjObject = json.loads(gj)
 
-def haversine(lat1, long1, lat2, long2):
-    """
+#  en EE un Feature esta definido por un GeoJSON que contiene una geometria 
+# y propiedades almacenadas en un diccionario
+# GeoJSON (RFC7946) https://geojson.org/
+geometry = ee.Geometry(gjObject)
 
-    The haversine formula determines the 
-    great-circle distance between two points 
-    on a sphere given their longitudes and latitudes.
+# selecciono el catalogo de copernicus sentinel2
+image_collection = ee.ImageCollection('COPERNICUS/S2')
 
-    Parameters:
-    lat1 (Number): Latitude of the first point
-    lonng1 (Number): Longitud of the first point
-    lat2 (Number): Latitude of the second point
-    lonng2 (Number): Longitud of the second point
+# defino filtro geometria
+glopez_area = ee.Feature(geometry)
 
-    Returns:
-    distance: The distance between tow point in the earth surface
+# defino filtro temporal
+# Cada camapaña va desde mayo a abril de cada año. 
+#Campaña 18/19
+camp_1819 = ['2018-05-01', '2019-05-01']
+#Campaña 19/20
+camp_1920 = ['2019-05-01','2020-05-01']
 
-    """
-    rLat1 = math.radians(lat1)
-    rLong1 = math.radians(long1)
-   
-    rLat2 = math.radians(lat2)
-    rLong2 = math.radians(long2)
-    
-    dLat = rLat2 - rLat1
-    dLong = rLong2 - rLong1
+# filtro el catalogo por geometria, tiempo nubosidad y bandas
+camp1819_imagenes = image_collection \
+    .filterBounds(geometry) \
+    .filterDate(camp_1819[0], camp_1819[1]) \
+    .filterMetadata('CLOUDY_PIXEL_PERCENTAGE','less_than', 10)\
+    .select(['B1','B2','B3','B4','B5','B6','B7','B8','B8A','B9', 'B11','B12'])
 
-    # haversine formula using the earth radius
-    a = math.sin(dLat/2)**2 + math.cos(rLat1) * math.cos(rLat2) \
-        * math.sin(dLong/2)**2
-    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
-    distance = 6371 * c
+camp1920_imagenes = image_collection \
+    .filterBounds(geometry) \
+    .filterDate(camp_1920[0], camp_1920[1]) \
+    .filterMetadata('CLOUDY_PIXEL_PERCENTAGE','less_than', 10)\
+    .select(['B1','B2','B3','B4','B5','B6','B7','B8','B8A','B9', 'B11','B12'])
 
-    return distance
+count = camp1819_imagenes.size();
+print(f'Cantidad de imagenes:{count}');
 
-def getRectangleFromGeometry(geometry):
-    results = {'N': None, 'S': None, 'W': None, 'E': None}
-    def findPoints(geometry, results):
-        for i in range(geometry.GetPointCount()):
-            x, y, _ = geometry.GetPoint(i)
-            if results['N'] == None or results['N'][1] < y:
-                results['N'] = (x,y)
-            if results['S'] == None or results['S'][1] > y:
-                results['S'] = (x,y)
-            if results['W'] == None or results['W'][0] < x:
-                results['W'] = (x,y)
-            if results['E'] == None or results['E'][0] > x:
-                results['E'] = (x,y)
-        return results
-    for i in range(geometry.GetGeometryCount()):
-        findPoints(geometry.GetGeometryRef(i), results)
-    return results
+count = camp1920_imagenes.size();
+print(f'Cantidad de imagenes:{count}');
 
-rectangle = getRectangleFromGeometry(feature.GetGeometryRef())
-n, s, w, e = rectangle.values()
-print('The area under observation is delimited by the rectangle',
-    f'{n}, {s}, {w}, {e}')
+# batch permite usar el sistema de ee para ejecutar tareas
+# de este modo podemos usar la funcionalidad de la case Export
+# para almacenar las imagenes en batches
+def export(collection, description):
+    params = {
+        'description': description,
+        'folder':'images',
+        'scale': 30,
+        'fileFormat': 'GeoTIFF',
+    }
+    task = ee.batch.Export.image.toDrive(collection, **params)
+    task.start()
+    while task.active():
+            time.sleep(30)
+            print(task.status())
+
+export(camp1819_imagenes, 'campania_1819')
+export(camp1920_imagenes, 'campania_1920')
+
